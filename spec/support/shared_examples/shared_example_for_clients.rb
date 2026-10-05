@@ -1,6 +1,6 @@
 require 'time'
 
-shared_examples_for 'a basic client' do |url = 'http://127.0.0.1:9292', opts = {}|
+shared_examples_for 'a basic client' do |url = "http://127.0.0.1:#{EXCON_TEST_PORT}", opts = {}|
   # TODO: Ditch iterator and manually write a context for each set of options
   ([true, false] * 2).combination(2).to_a.uniq.each do |nonblock, persistent|
     context "when nonblock is #{nonblock} and persistent is #{persistent}" do

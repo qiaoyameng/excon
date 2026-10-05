@@ -15,6 +15,6 @@ module ErrorServer
 end
 
 EM.run do
-  EM.start_server("127.0.0.1", 9292, ErrorServer)
+  EM.start_server("127.0.0.1", Integer(ENV.fetch('EXCON_TEST_PORT', '9292')), ErrorServer)
   $stderr.puts "ready"
 end

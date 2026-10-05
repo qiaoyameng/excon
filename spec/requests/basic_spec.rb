@@ -7,7 +7,7 @@ describe Excon::Connection do
       Excon::Connection.new(host: '127.0.0.1',
                                            hostname: '127.0.0.1',
                                            nonblock: false,
-                                           port: 9292,
+                                           port: EXCON_TEST_PORT,
                                            scheme: 'http',
                                            ssl_verify_peer: false)
     end
@@ -46,7 +46,7 @@ describe Excon::Connection do
       Excon::VALID_REQUEST_KEYS.freeze
 
       r = Ractor.new do
-        response = Excon.get('http://127.0.0.1:9292/foo')
+        response = Excon.get("http://127.0.0.1:#{EXCON_TEST_PORT}/foo")
         response.body
       end
 

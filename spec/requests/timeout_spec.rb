@@ -8,7 +8,7 @@ describe Excon::Connection do
     Excon::Connection.new(host: '127.0.0.1',
                           hostname: '127.0.0.1',
                           nonblock: nonblock,
-                          port: 9292,
+                          port: EXCON_TEST_PORT,
                           scheme: 'http',
                           timeout: timeout,
                           read_timeout: read_timeout)

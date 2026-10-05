@@ -12,6 +12,6 @@ module EOFServer
 end
 
 EM.run do
-  EM.start_server("127.0.0.1", 9292, EOFServer)
+  EM.start_server("127.0.0.1", Integer(ENV.fetch('EXCON_TEST_PORT', '9292')), EOFServer)
   $stderr.puts "ready"
 end

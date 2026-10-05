@@ -7,6 +7,11 @@ TEST_SUITE_DEFAULTS = {
 require 'excon'
 require 'excon/test/server'
 require 'json'
+require 'socket'
+
+# Each test process owns a different loopback endpoint.
+EXCON_TEST_PORT = TCPServer.open('127.0.0.1', 0) { |server| server.addr[1] }
+ENV['EXCON_TEST_PORT'] = EXCON_TEST_PORT.to_s
 
 # See http://rubydoc.info/gems/rspec-core/RSpec/Core/Configuration
 RSpec.configure do |config|

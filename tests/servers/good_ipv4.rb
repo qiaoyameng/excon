@@ -3,6 +3,6 @@
 require File.join(File.expand_path(File.dirname(__FILE__)), 'good')
 
 EM.run do
-  EM.start_server("127.0.0.1", 9292, GoodServer)
+  EM.start_server("127.0.0.1", Integer(ENV.fetch('EXCON_TEST_PORT', '9292')), GoodServer)
   $stderr.puts "ready"
 end

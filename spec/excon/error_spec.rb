@@ -80,7 +80,7 @@ describe Excon::Error do
     context 'when :debug_request and :debug_response are switched off' do
       it('exception message does not include response or response info') do
         begin
-          Excon.get('http://127.0.0.1:9292/error/not_found', expects: 200)
+          Excon.get("http://127.0.0.1:#{EXCON_TEST_PORT}/error/not_found", expects: 200)
         rescue Excon::Errors::HTTPStatusError => err
           truth =
             err.message.include?('Expected(200) <=> Actual(404 Not Found)') &&
@@ -94,7 +94,7 @@ describe Excon::Error do
     context 'when :debug_request and :debug_response are switched on' do
       it 'exception message includes request and response info' do
         begin
-          Excon.get('http://127.0.0.1:9292/error/not_found', expects: 200,
+          Excon.get("http://127.0.0.1:#{EXCON_TEST_PORT}/error/not_found", expects: 200,
                                                              debug_request: true, debug_response: true)
         rescue Excon::Errors::HTTPStatusError => err
           truth =
@@ -109,7 +109,7 @@ describe Excon::Error do
     context 'when only :debug_request is turned on' do
       it('exception message includes only request info') do
         begin
-          Excon.get('http://127.0.0.1:9292/error/not_found', expects: 200,
+          Excon.get("http://127.0.0.1:#{EXCON_TEST_PORT}/error/not_found", expects: 200,
                                                              debug_request: true)
         rescue Excon::Errors::HTTPStatusError => err
           truth =
@@ -124,7 +124,7 @@ describe Excon::Error do
     context 'when only :debug_response is turned on ' do
       it('exception message includes only response info') do
         begin
-          Excon.get('http://127.0.0.1:9292/error/not_found', expects: 200,
+          Excon.get("http://127.0.0.1:#{EXCON_TEST_PORT}/error/not_found", expects: 200,
                                                              debug_response: true)
         rescue Excon::Errors::HTTPStatusError => err
           truth =

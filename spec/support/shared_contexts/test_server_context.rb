@@ -24,7 +24,7 @@
 shared_context "test server" do |plugin, file, opts = {}|
   plugin = plugin.to_sym unless plugin.is_a? Symbol
   abs_file = Object.send(:"#{plugin}_path", file)
-  args = { plugin => abs_file}
+  args = { plugin => abs_file, bind: "tcp://127.0.0.1:#{EXCON_TEST_PORT}" }
   args[:bind] = opts[:bind] if opts.key? :bind
 
 

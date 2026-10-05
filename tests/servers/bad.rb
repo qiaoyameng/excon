@@ -20,6 +20,6 @@ module BadServer
 end
 
 EM.run do
-  EM.start_server("127.0.0.1", 9292, BadServer)
+  EM.start_server("127.0.0.1", Integer(ENV.fetch('EXCON_TEST_PORT', '9292')), BadServer)
   $stderr.puts "ready"
 end

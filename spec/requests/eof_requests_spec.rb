@@ -5,7 +5,7 @@ describe Excon do
     context('to a server that does not supply response headers') do
       include_context("test server", :exec, 'bad.rb', :before => :start, :after => :stop )
       before(:all) do
-        @conn = Excon.new('http://127.0.0.1:9292')
+        @conn = Excon.new("http://127.0.0.1:#{EXCON_TEST_PORT}")
       end
 
       context('when no block is given') do
@@ -29,7 +29,7 @@ describe Excon do
       include_context("test server", :exec, 'eof.rb', :before => :start, :after => :stop )
 
       it 'should raise an EOFError' do
-        expect { Excon.get('http://127.0.0.1:9292/eof') }.to raise_error(Excon::Errors::SocketError)
+        expect { Excon.get("http://127.0.0.1:#{EXCON_TEST_PORT}/eof") }.to raise_error(Excon::Errors::SocketError)
       end
     end
   end
