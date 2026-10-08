@@ -1,3 +1,10 @@
+1.7.3
+==================
+
+- add Connection#pipeline_requests for pipelined requests that retain partial
+  results (:completed, :sent_outcome_unknown, :not_sent) instead of raising at
+  the first socket failure and discarding earlier responses
+
 1.7.2 2026-09-28
 ==================
 

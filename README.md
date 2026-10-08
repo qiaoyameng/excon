@@ -267,6 +267,29 @@ large_array_of_requests = [{:method => :get, :path => 'some_path'}, { ... }] # H
 connection.batch_requests(large_array_of_requests)
 ```
 
+If the connection breaks mid-batch, `requests` raises and discards the responses that were already received. The `pipeline_requests` method instead returns one result per input request, in input order, without raising. Each result is an `Excon::Pipeline::Result` whose `status` is:
+
+- `:completed` &mdash; the full response was received (available via `result.response`)
+- `:sent_outcome_unknown` &mdash; request bytes may have reached the server, but no full response was obtained (`result.error` keeps the reason); these items are not retried automatically
+- `:not_sent` &mdash; no request bytes could have been sent (`result.error` keeps the reason)
+
+The underlying connection is removed from the reuse pool after any failure, and the params hashes you pass in are not modified. An empty array returns an empty array.
+
+```ruby
+connection = Excon.new('http://geemus.com/', :persistent => true)
+results = connection.pipeline_requests([{:method => :get}, {:method => :get}])
+results.each do |result|
+  case result.status
+  when Excon::Pipeline::COMPLETED
+    puts result.response.body
+  when Excon::Pipeline::SENT_OUTCOME_UNKNOWN
+    warn "request #{result.index} may have been processed: #{result.error}"
+  when Excon::Pipeline::NOT_SENT
+    warn "request #{result.index} was never sent: #{result.error}"
+  end
+end
+```
+
 ## Streaming Responses
 
 You can stream responses by passing a block that will receive each chunk.

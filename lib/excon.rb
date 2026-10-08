@@ -30,6 +30,7 @@ require 'excon/error'
 require 'excon/resolver_factory'
 require 'excon/constants'
 require 'excon/utils'
+require 'excon/pipeline'
 
 require 'excon/connection'
 require 'excon/headers'

@@ -290,6 +290,11 @@ module Excon
 
       datum[:connection] = self
 
+      # A retaining pipeline needs to observe the exact point at which request
+      # bytes start going out, so that an item can never be misreported as
+      # unsent after a partial write.
+      install_pipeline_write_marker if datum[:pipeline] && @pipeline_sent_indexes
+
       # cleanup data left behind on persistent connection after interrupt
       if datum[:persistent] && !@persistent_socket_reusable
         reset
@@ -375,12 +380,144 @@ module Excon
       responses
     end
 
+    # Sends the supplied requests over a single HTTP/1.1 pipeline and retains
+    # partial results instead of raising at the first failure.
+    #
+    # Returns one {Excon::Pipeline::Result} per input request, in input order.
+    # Each result is +:completed+ with a full response, +:sent_outcome_unknown+
+    # when its bytes may have left the wire but no full response was obtained,
+    # or +:not_sent+ when no bytes could have been written. Unknown items are
+    # not retried automatically. The input hashes are not modified.
+    #
+    # @param pipeline_params [Array<Hash>] params for each request, see #request
+    # @return [Array<Excon::Pipeline::Result>]
+    def pipeline_requests(pipeline_params)
+      retaining_pipeline(pipeline_params)
+    end
+    alias_method :requests_with_results, :pipeline_requests
+
     def reset
-      if (old_socket = sockets.delete(@socket_key))
-        old_socket.close rescue nil
+      unless @pipeline_retain_socket
+        if (old_socket = sockets.delete(@socket_key))
+          old_socket.close rescue nil
+        end
       end
       @persistent_socket_reusable = true
     end
+
+    private
+
+    # Shared implementation for the retaining pipeline entry points.
+    def retaining_pipeline(pipeline_params)
+      return [] if pipeline_params.empty?
+
+      params = nil
+      results = nil
+
+      # The caller's params are never modified; work on copies.
+      params = pipeline_params.map(&:dup)
+      params.each {|request_params| request_params.merge!(:pipeline => true, :persistent => true) }
+      params.last[:persistent] = @data[:persistent]
+
+      # Tracks the zero-based batch index currently writing, and which indexes
+      # have started writing request bytes.
+      @pipeline_sent_indexes = []
+      @pipeline_current_index = 0
+      @pipeline_retain_socket = true
+
+      datums = []
+      failure_error = nil
+
+      params.each do |request_params|
+        datums << request(request_params)
+        @pipeline_current_index += 1
+      rescue => error
+        failure_error = error
+        break
+      end
+
+      results = Array.new(params.length) do |index|
+        Excon::Pipeline::Result.new(index, Excon::Pipeline::NOT_SENT)
+      end
+
+      completed_count = 0
+      # Parse complete responses in order. When the send phase failed this still
+      # salvages any complete responses already buffered; the first read/parse
+      # failure ends the salvage. A half response never completes an item.
+      datums.each do |datum|
+        response = Excon::Response.new(response(datum)[:response])
+        results[completed_count] = Excon::Pipeline::Result.new(
+          completed_count, Excon::Pipeline::COMPLETED, :response => response
+        )
+        completed_count += 1
+      rescue => error
+        failure_error ||= error
+        break
+      end
+
+      if failure_error
+        # Every non-completed item keeps the failure reason. Items whose bytes
+        # (even partially) reached the wire are outcome unknown; later items
+        # were never sent.
+        params.each_index do |index|
+          next if index < completed_count
+
+          if @pipeline_sent_indexes.include?(index)
+            status = Excon::Pipeline::SENT_OUTCOME_UNKNOWN
+          else
+            status = Excon::Pipeline::NOT_SENT
+          end
+          results[index] = Excon::Pipeline::Result.new(
+            index, status, :error => failure_error
+          )
+        end
+      end
+
+      results
+    ensure
+      @pipeline_sent_indexes = nil
+      @pipeline_current_index = nil
+      @pipeline_retain_socket = false
+      clear_pipeline_write_marker
+      finalize_pipeline(params, failure_error, results)
+    end
+
+    def clear_pipeline_write_marker
+      if (connection_socket = sockets[@socket_key]) &&
+         connection_socket.singleton_class.ancestors.include?(Excon::Pipeline::WriteMarker)
+        connection_socket.pipeline_write_callback = nil
+      end
+    end
+
+    def install_pipeline_write_marker
+      connection_socket = socket
+      unless connection_socket.singleton_class.ancestors.include?(Excon::Pipeline::WriteMarker)
+        connection_socket.singleton_class.prepend(Excon::Pipeline::WriteMarker)
+      end
+      connection_socket.pipeline_write_callback = proc do
+        index = @pipeline_current_index
+        @pipeline_sent_indexes << index unless @pipeline_sent_indexes.include?(index)
+      end
+    end
+
+    def finalize_pipeline(params, failure_error, results = nil)
+      if failure_error
+        # A failed underlying connection must never be reused.
+        reset
+        return
+      end
+
+      return unless params && !params.empty?
+
+      if !@data[:persistent]
+        reset
+      elsif (last_response = results && results.reverse.find(&:completed?)&.response)
+        key = last_response[:headers].keys.detect {|header| header.casecmp?('Connection') }
+        reset if key && last_response[:headers][key].casecmp?('close')
+      end
+    end
+
+    public
 
     # Generate HTTP request verb methods
     Excon::HTTP_VERBS.each do |method|
