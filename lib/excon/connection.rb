@@ -233,73 +233,7 @@ module Excon
     # @option params [String] :path appears after 'scheme://host:port/'
     # @option params [Hash]   :query appended to the 'scheme://host:port/path/' in the form of '?key=value'
     def request(params={}, &block)
-      # @data has defaults, merge in new params to override
-      datum = @data.merge(params)
-
-      # Set the deadline for the current request in order to determine when we have run out of time.
-      # Only set when a request timeout has been defined.
-      if datum[:timeout]
-        datum[:deadline] = Process.clock_gettime(Process::CLOCK_MONOTONIC) + datum[:timeout]
-      end
-
-      datum[:headers] = @data[:headers].merge(datum[:headers] || {})
-
-      validate_params(:request, params, datum[:middlewares])
-      # If the user passed in new middleware, we want to validate that the original connection parameters
-      # are still valid with the provided middleware.
-      if params[:middlewares]
-        validate_params(:connection, @data, datum[:middlewares])
-      end
-
-      if datum[:user] || datum[:password]
-        user, pass = Utils.unescape_uri(datum[:user].to_s), Utils.unescape_uri(datum[:password].to_s)
-        datum[:headers]['Authorization'] ||= 'Basic ' + ["#{user}:#{pass}"].pack('m').delete(Excon::CR_NL)
-      end
-
-      host_key = datum[:headers].keys.detect {|k| k.casecmp?('Host') } || 'Host'
-      if datum[:scheme] == UNIX
-        datum[:headers][host_key] ||= ''
-      else
-        if datum[:host].nil?
-          raise Excon::Error::InvalidParameter, "host is required for non-Unix connections; " \
-                                                "the URL may be malformed (e.g. missing \"//\" after the scheme)"
-        end
-        datum[:headers][host_key] ||= datum[:host] + port_string(datum)
-      end
-
-      # RFC 7230, section 5.4, states that the Host header SHOULD be the first one # to be present.
-      # Some web servers will reject the request if it comes too late, so let's hoist it to the top.
-      if (host = datum[:headers].delete(host_key))
-        datum[:headers] = { host_key => host }.merge(datum[:headers])
-      end
-
-      # default to GET if no method specified
-      unless datum[:method]
-        datum[:method] = :get
-      end
-
-      # if path is empty or doesn't start with '/', insert one
-      unless datum[:path][0, 1] == '/'
-        datum[:path] = datum[:path].dup.insert(0, '/')
-      end
-
-      if block_given?
-        Excon.display_warning('Excon requests with a block are deprecated, pass :response_block instead.')
-        datum[:response_block] = block
-      end
-
-      datum[:connection] = self
-
-      # cleanup data left behind on persistent connection after interrupt
-      if datum[:persistent] && !@persistent_socket_reusable
-        reset
-      end
-
-      datum[:stack] = datum[:middlewares].map do |middleware|
-        lambda {|stack| middleware.new(stack)}
-      end.reverse.inject(self) do |middlewares, middleware|
-        middleware.call(middlewares)
-      end
+      datum = build_request_datum(params, block)
       datum = datum[:stack].request_call(datum)
 
       unless datum[:pipeline]
@@ -375,6 +309,41 @@ module Excon
       responses
     end
 
+    # Sends the supplied requests over one connection using HTTP/1.1
+    # pipelining, preserving a result for every input position instead of
+    # raising when the connection fails midway through the pipeline.
+    #
+    # Returns an Array of Hashes aligned with +pipeline_params+. Each Hash has:
+    #   :status   - +:completed+, +:sent_outcome_unknown+ or +:not_sent+
+    #   :response - an Excon::Response when +:status+ is +:completed+
+    #   :error    - the rescued Exception when a failure was encountered
+    #
+    # An item is never reported as +:not_sent+ once any of its bytes may have
+    # been written, a partially received response is never +:completed+, and
+    # items whose outcome is unknown are never retried.
+    #
+    # @param pipeline_params [Array<Hash>] per-request params, see #request
+    def pipeline_requests(pipeline_params)
+      return [] if pipeline_params.empty?
+
+      datums = pipeline_params.each_with_index.map { |params, index| build_pipeline_datum(params, index) }
+      results = Array.new(datums.length)
+
+      begin
+        wrapper = pipeline_socket
+      rescue => error
+        datums.each_index { |index| results[index] = pipeline_result(:not_sent, nil, error) }
+        return results
+      end
+
+      send_failure_index, send_failure = send_pipeline_requests(wrapper, datums)
+      read_pipeline_responses(datums, results, send_failure_index)
+      classify_pipeline_send_failure(wrapper, datums, results, send_failure_index, send_failure)
+      finalize_pipeline_connection(results)
+
+      results
+    end
+
     def reset
       if (old_socket = sockets.delete(@socket_key))
         old_socket.close rescue nil
@@ -420,6 +389,196 @@ module Excon
     end
 
     private
+
+    def build_request_datum(params={}, block = nil)
+      # @data has defaults, merge in new params to override. Never mutate the
+      # caller's params Hash.
+      datum = @data.merge(params)
+
+      # Set the deadline for the current request in order to determine when we have run out of time.
+      # Only set when a request timeout has been defined.
+      if datum[:timeout]
+        datum[:deadline] = Process.clock_gettime(Process::CLOCK_MONOTONIC) + datum[:timeout]
+      end
+
+      datum[:headers] = @data[:headers].merge(datum[:headers] || {})
+
+      validate_params(:request, params, datum[:middlewares])
+      # If the user passed in new middleware, we want to validate that the original connection parameters
+      # are still valid with the provided middleware.
+      if params[:middlewares]
+        validate_params(:connection, @data, datum[:middlewares])
+      end
+
+      if datum[:user] || datum[:password]
+        user, pass = Utils.unescape_uri(datum[:user].to_s), Utils.unescape_uri(datum[:password].to_s)
+        datum[:headers]['Authorization'] ||= 'Basic ' + ["#{user}:#{pass}"].pack('m').delete(Excon::CR_NL)
+      end
+
+      host_key = datum[:headers].keys.detect {|k| k.casecmp?('Host') } || 'Host'
+      if datum[:scheme] == UNIX
+        datum[:headers][host_key] ||= ''
+      else
+        if datum[:host].nil?
+          raise Excon::Error::InvalidParameter, "host is required for non-Unix connections; " \
+                                                "the URL may be malformed (e.g. missing \"//\" after the scheme)"
+        end
+        datum[:headers][host_key] ||= datum[:host] + port_string(datum)
+      end
+
+      # RFC 7230, section 5.4, states that the Host header SHOULD be the first one # to be present.
+      # Some web servers will reject the request if it comes too late, so let's hoist it to the top.
+      if (host = datum[:headers].delete(host_key))
+        datum[:headers] = { host_key => host }.merge(datum[:headers])
+      end
+
+      # default to GET if no method specified
+      unless datum[:method]
+        datum[:method] = :get
+      end
+
+      # if path is empty or doesn't start with '/', insert one
+      unless datum[:path][0, 1] == '/'
+        datum[:path] = datum[:path].dup.insert(0, '/')
+      end
+
+      unless block.nil?
+        Excon.display_warning('Excon requests with a block are deprecated, pass :response_block instead.')
+        datum[:response_block] = block
+      end
+
+      datum[:connection] = self
+
+      # cleanup data left behind on persistent connection after interrupt
+      if datum[:persistent] && !@persistent_socket_reusable
+        reset
+      end
+
+      datum[:stack] = build_middleware_stack(datum)
+      datum
+    end
+
+    def build_middleware_stack(datum)
+      datum[:middlewares].map do |middleware|
+        lambda {|stack| middleware.new(stack)}
+      end.reverse.inject(self) do |middlewares, middleware|
+        middleware.call(middlewares)
+      end
+    end
+
+    def pipeline_socket
+      raw_socket = socket(@data)
+      raw_socket = raw_socket.inner_socket if raw_socket.is_a?(PipelineSocket)
+      wrapper = PipelineSocket.new(raw_socket)
+      # Replace the cached socket so request_call and the response parser go
+      # through the wrapper and every write can be attributed to a request.
+      sockets[@socket_key] = wrapper
+      wrapper
+    end
+
+    def build_pipeline_datum(params, index)
+      datum = build_request_datum(params)
+      datum[:pipeline] = true
+      datum[:pipeline_index] = index
+      datum
+    end
+
+    def pipeline_result(status, response, error)
+      {
+        :status => status,
+        :response => response,
+        :error => error
+      }
+    end
+
+    # Writes every request so they sit in flight on one connection. Returns the
+    # [index, error] of the first request whose write failed, or [nil, nil].
+    def send_pipeline_requests(wrapper, datums)
+      failure = nil
+      failure_index = nil
+
+      datums.each_with_index do |datum, index|
+        break if failure
+
+        wrapper.current_datum = datum
+        begin
+          datum[:stack].request_call(datum)
+        rescue => error
+          failure = error
+          failure_index = index
+        end
+      end
+      wrapper.current_datum = nil
+
+      [failure_index, failure]
+    end
+
+    # Reads responses in input order, stopping at the first one that cannot be
+    # fully received or processed.
+    def read_pipeline_responses(datums, results, send_failure_index)
+      datums.each_with_index do |datum, index|
+        next if send_failure_index && index >= send_failure_index
+
+        begin
+          response = Excon::Response.new(response(datum)[:response])
+          results[index] = pipeline_result(:completed, response, nil)
+        rescue => error
+          mark_pipeline_read_failure(datums, results, index, unwrap_pipeline_error(error))
+          break
+        end
+      end
+    end
+
+    def mark_pipeline_read_failure(datums, results, index, error)
+      parsed = datums[index][:response]
+      saved_response = parsed && parsed[:complete] ? Excon::Response.new(parsed) : nil
+      results[index] = pipeline_result(:sent_outcome_unknown, saved_response, error)
+      ((index + 1)...datums.length).each do |remaining_index|
+        results[remaining_index] = pipeline_result(:sent_outcome_unknown, nil, error)
+      end
+    end
+
+    # Parser and response middleware errors are wrapped as transport Socket
+    # errors by #response; unwrap those concrete reasons while keeping genuine
+    # transport failures as SocketError.
+    def unwrap_pipeline_error(error)
+      cause = error.is_a?(Excon::Error::Socket) ? error.socket_error : nil
+      if cause && !transport_error?(cause)
+        cause
+      else
+        error
+      end
+    end
+
+    def classify_pipeline_send_failure(wrapper, datums, results, failure_index, failure)
+      return unless failure_index
+
+      failed_datum = datums[failure_index]
+      status = wrapper.sent?(failed_datum) ? :sent_outcome_unknown : :not_sent
+      results[failure_index] = pipeline_result(status, nil, failure)
+
+      ((failure_index + 1)...datums.length).each do |index|
+        results[index] ||= pipeline_result(:not_sent, nil, nil)
+      end
+    end
+
+    def finalize_pipeline_connection(results)
+      if results.any? {|result| result[:status] != :completed }
+        # The stream is in an unknown state; never reuse the connection.
+        reset
+      elsif !@data[:persistent]
+        reset
+      elsif (key = results.last[:response][:headers].keys.detect {|k| k.casecmp?('Connection') })
+        reset if results.last[:response][:headers][key].casecmp?('close')
+      end
+    end
+
+    def transport_error?(error)
+      error.is_a?(SystemCallError) ||
+        error.is_a?(EOFError) ||
+        error.is_a?(IOError) ||
+        (defined?(OpenSSL::SSL::SSLError) && error.is_a?(OpenSSL::SSL::SSLError))
+    end
 
     def detect_content_length(body)
       if body.respond_to?(:size)

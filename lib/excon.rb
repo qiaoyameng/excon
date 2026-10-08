@@ -33,6 +33,7 @@ require 'excon/utils'
 
 require 'excon/connection'
 require 'excon/headers'
+require 'excon/pipeline_socket'
 require 'excon/response'
 require 'excon/middlewares/escape_path'
 require 'excon/middlewares/redirect_follower'

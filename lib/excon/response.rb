@@ -187,6 +187,7 @@ module Excon
           end
         end
       end
+      datum[:response][:complete] = true
       datum
     end
 
