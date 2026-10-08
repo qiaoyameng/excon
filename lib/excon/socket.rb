@@ -110,6 +110,17 @@ module Excon
       end
     end
 
+    # Returns any bytes that were already read from the socket but not yet
+    # consumed by the caller, removing them from the internal read buffer.
+    # In block mode, over-read bytes stay inside the IO's own buffer and are
+    # served first by subsequent reads, so this returns an empty string.
+    def drain_read_buffer
+      leftover = @read_buffer[@read_offset..-1] || String.new(encoding: Encoding::BINARY)
+      @read_buffer.clear
+      @read_offset = 0
+      leftover
+    end
+
     def local_address
       unpacked_sockaddr[1]
     end

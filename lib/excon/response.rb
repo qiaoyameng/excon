@@ -104,7 +104,9 @@ module Excon
 
       parse_headers(socket, datum)
 
-      unless (['HEAD', 'CONNECT'].include?(datum[:method].to_s.upcase)) || NO_ENTITY.include?(datum[:response][:status])
+      # 101 (Switching Protocols) also has no body; any bytes following the
+      # head belong to the protocol the connection is being upgraded to.
+      unless (['HEAD', 'CONNECT'].include?(datum[:method].to_s.upcase)) || NO_ENTITY.include?(datum[:response][:status]) || datum[:response][:status] == 101
 
         if (key = datum[:response][:headers].keys.detect {|k| k.casecmp?('Transfer-Encoding') })
           encodings = Utils.split_header_value(datum[:response][:headers][key])

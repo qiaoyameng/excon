@@ -1,3 +1,10 @@
+Unreleased
+==================
+
+- add `Connection#upgrade` for HTTP Upgrade (101) handshakes; on success it
+  returns an `Excon::Upgrade` takeover object owning the socket, which
+  delivers bytes read past the response head before newer socket data
+
 1.7.2 2026-09-28
 ==================
 

@@ -12,6 +12,7 @@ Excon was designed to be simple, fast and performant. It works great as a genera
 - [Chunked Requests](#chunked-requests)
 - [Pipelining Requests](#pipelining-requests)
 - [Streaming Responses](#streaming-responses)
+- [HTTP Upgrade](#http-upgrade)
 - [Proxy Support](#proxy-support)
 - [Reusable ports](#reusable-ports)
 - [Unix Socket Support](#unix-socket-support)
@@ -281,6 +282,28 @@ Excon.get('http://geemus.com', :response_block => streamer)
 ```
 
 Iterating over each chunk will allow you to do work on the response incrementally without buffering the entire response first. For very large responses this can lead to significant memory savings.
+
+## HTTP Upgrade
+
+You can perform an HTTP Upgrade handshake and take over the underlying connection with `Connection#upgrade`. Pass the desired protocol via the `Upgrade` header; Excon adds `Connection: Upgrade` automatically.
+
+```ruby
+connection = Excon.new('http://geemus.com')
+takeover = connection.upgrade(:headers => { 'Upgrade' => 'echo' })
+
+if takeover.is_a?(Excon::Upgrade)
+  takeover.write("hello\n")
+  puts takeover.read(6)
+  takeover.close
+else
+  # handshake failed; a regular Excon::Response was returned
+  puts takeover.status
+end
+```
+
+When the server agrees (a `101` response whose `Upgrade` and `Connection` headers match the requested protocol), the socket is removed from Excon's persistent connection pool and wrapped in an `Excon::Upgrade` takeover object. Any bytes the response parser already read past the response head (the start of the upgraded protocol) are delivered first by `takeover.read`, before newer socket data. `takeover.write` writes to the socket and `takeover.close` closes it; `close` is idempotent and the takeover holds sole responsibility for closing the socket (`Connection#reset` no longer affects it). If the takeover object is simply abandoned, the socket is reclaimed by the garbage collector as usual.
+
+When the handshake fails, the response is handled like any other HTTP response and an `Excon::Response` is returned instead.
 
 ## Proxy Support
 

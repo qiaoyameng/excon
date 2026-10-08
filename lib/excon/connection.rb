@@ -375,6 +375,59 @@ module Excon
       responses
     end
 
+    # Sends an HTTP Upgrade handshake request to the destination host.
+    # When the server agrees (a 101 response whose Upgrade and Connection
+    # headers match the requested protocol), the underlying socket is removed
+    # from the persistent socket pool and handed over inside an
+    # Excon::Upgrade takeover object, which delivers any bytes the response
+    # parser already read past the response head before newer socket data.
+    # When the handshake fails, the response is handled like any other HTTP
+    # response and an Excon::Response is returned.
+    # @param [Hash<Symbol, >] params One or more optional params, override defaults set in Connection.new
+    # @option params [Hash<Symbol, String>] :headers Must include an 'Upgrade' protocol token, e.g. { 'Upgrade' => 'websocket' }
+    def upgrade(params = {})
+      params = params.dup
+      headers = Excon::Headers.new.merge!(params[:headers] || {})
+
+      upgrade_key = headers.keys.detect {|key| key.to_s.casecmp?('Upgrade') }
+      protocol = upgrade_key && headers[upgrade_key]
+      if protocol.nil? || protocol.to_s.empty?
+        raise ArgumentError, 'Connection#upgrade requires an Upgrade protocol, e.g. :headers => { "Upgrade" => "websocket" }'
+      end
+
+      connection_key = headers.keys.detect {|key| key.to_s.casecmp?('Connection') }
+      if connection_key
+        tokens = Utils.split_header_value(headers[connection_key])
+        unless tokens.any? {|token| token.casecmp?('upgrade') }
+          headers[connection_key] = (tokens + ['Upgrade']).join(', ')
+        end
+      else
+        headers['Connection'] = 'Upgrade'
+      end
+      params[:headers] = headers
+      params[:method] ||= :get
+
+      requested_persistent = params.key?(:persistent) ? params[:persistent] : @data[:persistent]
+      # the socket must survive the request so it can be taken over on a 101
+      params[:persistent] = true
+
+      response = request(params)
+
+      if response[:status] == 101
+        if valid_upgrade_response?(response[:headers], protocol) && (socket = sockets.delete(@socket_key))
+          Excon::Upgrade.new(socket, socket.drain_read_buffer)
+        else
+          # 101 without the agreed upon Upgrade/Connection fields; the
+          # connection state is unknown, so keep it out of the pool.
+          reset
+          response
+        end
+      else
+        reset unless requested_persistent
+        response
+      end
+    end
+
     def reset
       if (old_socket = sockets.delete(@socket_key))
         old_socket.close rescue nil
@@ -444,6 +497,15 @@ module Excon
           []
         end
       end
+    end
+
+    def valid_upgrade_response?(headers, protocol)
+      upgrade_key = headers.keys.detect {|key| key.to_s.casecmp?('Upgrade') }
+      connection_key = headers.keys.detect {|key| key.to_s.casecmp?('Connection') }
+      return false unless upgrade_key && connection_key
+
+      Utils.split_header_value(headers[upgrade_key]).any? {|token| token.casecmp?(protocol) } &&
+        Utils.split_header_value(headers[connection_key]).any? {|token| token.casecmp?('upgrade') }
     end
 
     def validate_params(validation, params, middlewares)
