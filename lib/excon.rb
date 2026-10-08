@@ -45,6 +45,7 @@ require 'excon/socks5_ssl_socket'
 require 'excon/instrumentors/standard_instrumentor'
 require 'excon/instrumentors/logging_instrumentor'
 require 'excon/unix_socket'
+require 'excon/upgrade'
 
 # Define defaults first so they will be available to other files
 module Excon
@@ -255,6 +256,14 @@ module Excon
           new(url, params).request(:method => :#{method}, &block)
         end
       DEF
+    end
+
+    # @see Connection#upgrade
+    # @param [String] url The destination URL
+    # @param [Hash<Symbol, >] params One or more optional params, must include :upgrade
+    # @return [Excon::Upgrade, Excon::Response]
+    def upgrade(url, params = {})
+      new(url, params).upgrade
     end
   end
 end

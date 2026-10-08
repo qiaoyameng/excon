@@ -375,6 +375,135 @@ module Excon
       responses
     end
 
+    # Sends a request asking the server to switch protocols (HTTP Upgrade,
+    # RFC 7230, section 6.7).
+    #
+    # When the server replies with a 101 (Switching Protocols) response whose
+    # Upgrade and Connection headers match the requested :upgrade protocol,
+    # the underlying socket is removed from this connection's pool and handed
+    # off inside an Excon::Upgrade. Bytes the response parser already read
+    # beyond the response headers are delivered first by the Excon::Upgrade,
+    # which holds the sole responsibility for closing the socket
+    # (Connection#reset no longer closes it).
+    #
+    # When the server does not switch protocols, the exchange is handled like
+    # any other request and an Excon::Response is returned.
+    #
+    # @param [Hash<Symbol, >] params One or more optional params, override defaults set in Connection.new
+    # @option params [String] :upgrade The protocol to switch to (required); sent as the Upgrade header
+    # @return [Excon::Upgrade, Excon::Response]
+    def upgrade(params = {})
+      datum = @data.merge(params)
+
+      # Set the deadline for the current request in order to determine when we have run out of time.
+      # Only set when a request timeout has been defined.
+      if datum[:timeout]
+        datum[:deadline] = Process.clock_gettime(Process::CLOCK_MONOTONIC) + datum[:timeout]
+      end
+
+      datum[:headers] = @data[:headers].merge(datum[:headers] || {})
+
+      validate_params(:request, params, datum[:middlewares])
+      # If the user passed in new middleware, we want to validate that the original connection parameters
+      # are still valid with the provided middleware.
+      if params[:middlewares]
+        validate_params(:connection, @data, datum[:middlewares])
+      end
+
+      protocol = datum[:upgrade]
+      if protocol.nil? || protocol.to_s.empty?
+        raise ArgumentError, 'An :upgrade protocol is required to upgrade a connection.'
+      end
+
+      if datum[:user] || datum[:password]
+        user, pass = Utils.unescape_uri(datum[:user].to_s), Utils.unescape_uri(datum[:password].to_s)
+        datum[:headers]['Authorization'] ||= 'Basic ' + ["#{user}:#{pass}"].pack('m').delete(Excon::CR_NL)
+      end
+
+      datum[:headers]['Connection'] ||= 'Upgrade'
+      datum[:headers]['Upgrade'] ||= protocol.to_s
+
+      host_key = datum[:headers].keys.detect {|k| k.casecmp?('Host') } || 'Host'
+      if datum[:scheme] == UNIX
+        datum[:headers][host_key] ||= ''
+      else
+        if datum[:host].nil?
+          raise Excon::Error::InvalidParameter, "host is required for non-Unix connections; " \
+                                                "the URL may be malformed (e.g. missing \"//\" after the scheme)"
+        end
+        datum[:headers][host_key] ||= datum[:host] + port_string(datum)
+      end
+
+      # RFC 7230, section 5.4, states that the Host header SHOULD be the first one # to be present.
+      # Some web servers will reject the request if it comes too late, so let's hoist it to the top.
+      if (host = datum[:headers].delete(host_key))
+        datum[:headers] = { host_key => host }.merge(datum[:headers])
+      end
+
+      # default to GET if no method specified
+      unless datum[:method]
+        datum[:method] = :get
+      end
+
+      # if path is empty or doesn't start with '/', insert one
+      unless datum[:path][0, 1] == '/'
+        datum[:path] = datum[:path].dup.insert(0, '/')
+      end
+
+      datum[:connection] = self
+
+      # cleanup data left behind on persistent connection after interrupt
+      if datum[:persistent] && !@persistent_socket_reusable
+        reset
+      end
+
+      datum[:stack] = datum[:middlewares].map do |middleware|
+        lambda {|stack| middleware.new(stack)}
+      end.reverse.inject(self) do |middlewares, middleware|
+        middleware.call(middlewares)
+      end
+      datum = datum[:stack].request_call(datum)
+
+      @persistent_socket_reusable = false
+      datum = response(datum)
+      @persistent_socket_reusable = true
+
+      if datum[:response][:status] == 101 && valid_upgrade_response?(datum) &&
+         (upgraded_socket = sockets.delete(@socket_key))
+        # the socket now belongs to the Excon::Upgrade and must neither stay
+        # in the persistent pool nor be closed by #reset
+        Excon::Upgrade.new(upgraded_socket, upgraded_socket.drain_read_buffer)
+      else
+        if datum[:response][:status] == 101
+          # the server switched to an unexpected protocol, so the connection
+          # can no longer be reused for HTTP
+          reset
+        elsif datum[:persistent]
+          if (key = datum[:response][:headers].keys.detect {|k| k.casecmp?('Connection') })
+            if datum[:response][:headers][key].casecmp?('close')
+              reset
+            end
+          end
+        else
+          reset
+        end
+
+        Excon::Response.new(datum[:response])
+      end
+    rescue => error
+      reset
+
+      # If we didn't get far enough to initialize datum and the middleware stack, just raise
+      raise error if !datum
+
+      datum[:error] = error
+      if datum[:stack]
+        datum[:stack].error_call(datum)
+      else
+        raise error
+      end
+    end
+
     def reset
       if (old_socket = sockets.delete(@socket_key))
         old_socket.close rescue nil
@@ -487,6 +616,19 @@ module Excon
       else
         raise_socket_error(error)
       end
+    end
+
+    # Checks that a 101 response agrees to the requested protocol: the
+    # Connection header must include an "upgrade" token and the Upgrade
+    # header must name the requested protocol (both case-insensitively).
+    def valid_upgrade_response?(datum)
+      headers = datum[:response][:headers]
+      connection_key = headers.keys.detect {|k| k.casecmp?('Connection') }
+      upgrade_key = headers.keys.detect {|k| k.casecmp?('Upgrade') }
+      return false unless connection_key && upgrade_key
+
+      Utils.split_header_value(headers[connection_key]).any? {|token| token.strip.casecmp?('upgrade') } &&
+        headers[upgrade_key].strip.casecmp?(datum[:upgrade].to_s)
     end
 
     def socket(datum = @data)

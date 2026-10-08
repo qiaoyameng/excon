@@ -64,6 +64,7 @@ module Excon
     response_block
     stubs
     timeout
+    upgrade
     user
     versions
     write_timeout

@@ -71,6 +71,18 @@ module Excon
       end
     end
 
+    # Returns any bytes already read from the underlying socket but not yet
+    # consumed by callers, emptying the internal read buffer. Used when the
+    # socket is handed off after an HTTP Upgrade handshake so that bytes the
+    # response parser read beyond the headers are neither lost nor duplicated.
+    # In blocking mode the buffer is unused (the wrapped IO keeps its own
+    # buffer, which is drained first on subsequent reads), so this is empty.
+    def drain_read_buffer
+      buffered = @read_buffer[@read_offset..-1]
+      @read_offset = @read_buffer.length
+      buffered
+    end
+
     def readline
       if @nonblock
         result = String.new

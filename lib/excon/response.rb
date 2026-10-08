@@ -104,7 +104,11 @@ module Excon
 
       parse_headers(socket, datum)
 
-      unless (['HEAD', 'CONNECT'].include?(datum[:method].to_s.upcase)) || NO_ENTITY.include?(datum[:response][:status])
+      # a 101 response to an upgrade request switches protocols, so there is
+      # no HTTP body to parse; any bytes after the headers belong to the new
+      # protocol and are handed off with the connection (see Connection#upgrade)
+      unless (['HEAD', 'CONNECT'].include?(datum[:method].to_s.upcase)) || NO_ENTITY.include?(datum[:response][:status]) ||
+             (datum[:upgrade] && datum[:response][:status] == 101)
 
         if (key = datum[:response][:headers].keys.detect {|k| k.casecmp?('Transfer-Encoding') })
           encodings = Utils.split_header_value(datum[:response][:headers][key])

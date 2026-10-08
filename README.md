@@ -12,6 +12,7 @@ Excon was designed to be simple, fast and performant. It works great as a genera
 - [Chunked Requests](#chunked-requests)
 - [Pipelining Requests](#pipelining-requests)
 - [Streaming Responses](#streaming-responses)
+- [HTTP Upgrade](#http-upgrade)
 - [Proxy Support](#proxy-support)
 - [Reusable ports](#reusable-ports)
 - [Unix Socket Support](#unix-socket-support)
@@ -281,6 +282,25 @@ Excon.get('http://geemus.com', :response_block => streamer)
 ```
 
 Iterating over each chunk will allow you to do work on the response incrementally without buffering the entire response first. For very large responses this can lead to significant memory savings.
+
+## HTTP Upgrade
+
+You can ask a server to switch protocols (RFC 7230, section 6.7) and keep using the same connection afterwards with `upgrade`, passing the protocol to switch to as `:upgrade`.
+
+```ruby
+connection = Excon.new('http://example.com')
+result = connection.upgrade(:path => '/chat', :upgrade => 'echo')
+
+if result.is_a?(Excon::Upgrade)
+  result.write("hello\n")
+  result.read(6) # => "hello\n"
+  result.close
+end
+```
+
+When the server replies with a valid `101 Switching Protocols` response (matching `Upgrade` and `Connection` headers), the underlying socket is removed from the connection's pool and returned inside an `Excon::Upgrade`. Any bytes the response parser already read beyond the response headers are delivered first, so nothing is lost or duplicated. The `Excon::Upgrade` is solely responsible for closing the socket (`Connection#reset` no longer closes it) and its `close` is idempotent. If the server does not switch protocols, the exchange is handled like any other request and an `Excon::Response` is returned.
+
+Note that `Excon::Upgrade` only gives you raw `read`/`write` access to the connection; it does not parse any subsequent protocol (e.g. WebSocket frames).
 
 ## Proxy Support
 
